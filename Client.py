@@ -22,7 +22,7 @@ class Massage:
         self.state = Queue()
         self.curr_num = 0
         self.curr_len = 0
-        self.recved_len = 0
+        self.received_len = 0
 
     def add_head(self, dlen, state):
         self.msg_code += struct.pack('!2s2i', b"##", dlen, state)
@@ -51,15 +51,15 @@ class Massage:
             self.msg.append('')
 
     def change_msg(self):
-        if self.curr_len > self.recved_len:
-            if len(self.msg_recv) < self.curr_len - self.recved_len:
+        if self.curr_len > self.received_len:
+            if len(self.msg_recv) < self.curr_len - self.received_len:
                 self.msg[self.curr_num] += self.msg_recv.decode('utf-8')
-                self.recved_len += len(self.msg_recv)
+                self.received_len += len(self.msg_recv)
                 self.msg_recv = b''
             else:
-                self.msg[self.curr_num] += self.msg_recv[:self.curr_len - self.recved_len].decode('utf-8')
-                self.recved_len = 0
-                self.msg_recv = self.msg_recv[self.curr_len - self.recved_len:]
+                self.msg[self.curr_num] += self.msg_recv[:self.curr_len - self.received_len].decode('utf-8')
+                self.received_len = 0
+                self.msg_recv = self.msg_recv[self.curr_len - self.received_len:]
                 self.curr_len = 0 if self.msg_len.empty else self.msg_len.get()
                 self.curr_num += 1
                 self.read_head()
