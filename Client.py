@@ -68,7 +68,7 @@ class Massage:
         self.curr_num -= 1
         msg = self.msg[0]
         self.msg = self.msg[1:]
-        return msg
+        return msg, self.state.get()
 
     def msg_empty(self):
         if len(self.msg) == 0:
@@ -77,17 +77,21 @@ class Massage:
             return False
 
 
-class ReadThread(threading.Thread):
-    def __init__(self, server_socket):
+class ClientThread(threading.Thread):
+    def __init__(self, server_socket, account):
         threading.Thread.__init__(self)
-        self.sock = server_socket
-        print('helo')
+        self.sock = server_socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.account = account
 
-    # def run(self):
+    def run(self):
+        self.sock.connect((Server_host, Server_port))
+
+        print("")
 
 
+# GUI类
 class GUI(QWidget):
-    def __init__(self):
+    def __init__(self):  # 登录窗口，布局，注册窗口，布局，主聊天窗口和布局
         super().__init__()
         self.login_win = QWidget()
         self.login_layout = QGridLayout()
@@ -95,7 +99,8 @@ class GUI(QWidget):
         self.sign_layout = QGridLayout()
         self.main_win = QWidget()
         self.main_layout = QGridLayout()
-        self.login_func()
+        self.main_func()
+        self.socket = socket.socket()
 
     # def initUI(self):
     #     self.setGeometry(300, 300, 300, 220)
@@ -103,6 +108,26 @@ class GUI(QWidget):
     #     self.setWindowIcon(QIcon('web.png'))
     #     self.show()
     #
+
+    def main_func(self):
+        print(" ")
+        self.login_func()  # 初始进入登录界面
+
+    def check_account(self, account):
+        for s in account:
+            if s < '0' or s > '9':
+                return False
+        return True
+
+
+    def login_handle(self, account, password):
+        if account == '':
+            print("eror")
+        elif password == '':
+            print("!")
+        elif not self.check_account(account):
+            error_account = QMessageBox.warning(self, "错误", "系统错误")
+            error_account.exec_()
     def login_func(self):
         self.login_win.setFixedSize(800,400)
         self.login_win.setWindowTitle("Login")
@@ -110,15 +135,23 @@ class GUI(QWidget):
         e_account = QLineEdit()
         l_pwd = QLabel("password")
         e_pwd = QLineEdit()
+        e_account.setFont(QFont('宋体', 8))
+        e_account.setPlaceholderText("请输入你的账号")
+        e_pwd.setFont(QFont('宋体', 8))
+        e_pwd.setPlaceholderText("请输入你的密码")
+
         b_sign = QPushButton("sign up")
         b_sign.clicked.connect(self.sign_func)
         b_sign.clicked.connect(self.login_win.close)
-
+        b_login = QPushButton("Login")
+        b_login.clicked.connect(lambda: self.login_handle(e_account.text(), e_pwd.text()))
+        # b_login.clicked.connect(self.login_win.close)
         self.login_layout.addWidget(l_account, 1, 1)
         self.login_layout.addWidget(e_account, 1, 2)
         self.login_layout.addWidget(l_pwd, 2, 1)
         self.login_layout.addWidget(e_pwd, 2, 2)
         self.login_layout.addWidget(b_sign, 3, 1)
+        self.login_layout.addWidget(b_login, 3, 2)
         self.login_win.setLayout(self.login_layout)
         self.login_win.show()
 
@@ -141,19 +174,31 @@ class GUI(QWidget):
 
     def chat_ui(self):
         self.main_win.setFixedSize(800, 400)
-
         self.main_win.setWindowTitle("Sign up")
-        l_account = QLabel("account")
-        e_account = QLineEdit()
-        l_pwd = QLabel("password")
-        e_pwd = QLineEdit()
-        b_main = QPushButton("back to login in")
-        b_main.clicked.connect(self.login_func)
-        b_main.clicked.connect(self.main_win.close)
-        self.main_layout.addWidget(l_account, 1, 1)
-        self.main_layout.addWidget(e_account, 1, 2)
-        self.main_layout.addWidget(l_pwd, 2, 1)
-        self.main_layout.addWidget(e_pwd, 2, 2)
+        chat_browser = QTextBrowser(self)
+        chat_browser.setFont(QFont('宋体', 8))
+        chat_browser.setReadOnly(True)
+        chat_browser.setPlaceholderText('消息展示区域...')
+        chat_browser.ensureCursorVisible()
+
+        write_browser = QTextEdit(self)
+        write_browser.setFont(QFont('宋体', 8))
+        chat_browser.ensureCursorVisible()
+
+        # l_account = QLabel("account")
+        # e_account = QLineEdit()
+        # l_pwd = QLabel("password")
+        # e_pwd = QLineEdit()
+        b_send = QPushButton("Send")
+        self.main_layout.addWidget(chat_browser, 0, 0)
+        self.main_layout.addWidget(write_browser, 1, 0)
+        self.main_layout.addWidget(b_send, 2, 1)
+
+        # b_send.clicked.connect(self.login_func)
+        # self.main_layout.addWidget(l_account, 1, 1)
+        # self.main_layout.addWidget(e_account, 1, 2)
+        # self.main_layout.addWidget(l_pwd, 2, 1)
+        # self.main_layout.addWidget(e_pwd, 2, 2)
         self.main_win.setLayout(self.main_layout)
         self.main_win.show()
 
