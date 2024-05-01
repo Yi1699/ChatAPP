@@ -1,3 +1,4 @@
+import json
 import socket
 import threading
 import sys
@@ -77,16 +78,92 @@ class Massage:
             return False
 
 
-class ClientThread(threading.Thread):
-    def __init__(self, server_socket, account):
+class ClientThread(threading.Thread, QObject):
+    chat_ui_signal = pyqtSignal()
+    message_show = pyqtSignal()
+
+    def __init__(self, account, password, win_ui):
         threading.Thread.__init__(self)
-        self.sock = server_socket(socket.AF_INET, socket.SOCK_STREAM)
+        QObject.__init__(self)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.account = account
+        self.password = password
+        self.msg_recv = Massage()
+        self.return_state = -1
+        self.win_ui = win_ui
+        self.user_list = {}
+        self.chat_ui_signal.connect(lambda: self.win_ui.chat_ui(self.user_list))
+        self.message_show.connect(lambda: self.win_ui.)
+        self.send_thread = SendThread(self.sock, self.account)
+        self.send_thread.start()
+
+    def join(self, timeout=None):
+        super().join()
+        return self.return_state
+
+    def run(self):
+        try:
+            self.sock.connect((Server_host, Server_port))
+            self.send_thread.login(self.account, self.password)
+        except:
+            self.return_state = 403
+            # self.chat_ui_signal.emit()
+            return self.return_state
+        while True:
+            self.msg_recv.read(self.sock.recv(Buffer_size))
+            while not self.msg_recv.msg_empty():
+                msg, state = self.msg_recv.get_msg()
+                # 每次读取一条消息,根据状态码作出相应动作
+                if state == 201:  # 登录成功（服务器发来在线成员）
+                    self.user_list = json.loads(msg)
+                    self.chat_ui_signal.emit()
+                    # return self.return_state
+                elif state == 401:  # 密码错误
+                    return state
+                elif state == 203:  # 接收到服务端消息
+
+                else:
+                    self.return_state = 2
+                    return self.return_state
+
+    def get_msg(self):
+        return self.msg_recv
+
+
+class SendThread(threading.Thread):
+    def __init__(self, client_socket, account):
+        threading.Thread.__init__(self)
+        self.sock = client_socket
+        self.msg_list = Queue()
         self.account = account
 
     def run(self):
         self.sock.connect((Server_host, Server_port))
+        while True:
+            new_msg = self.wait_send()
+            self.sock.send(new_msg)
 
-        print("")
+    # 阻塞等待消息队列加入消息
+    def wait_send(self):
+        while True:
+            if not self.msg_list.empty():
+                return self.msg_list.get()
+
+    # 外部调用接口，封装数据包加入消息队列
+    def add_msg(self, data, state):
+        data_send = Massage()
+        data_send.pack(data, state)
+        self.msg_list.put(data_send)
+
+    def login(self, account, password):
+        msg_login = {"account": account, "password": password}
+        msg_json = json.dumps(msg_login)
+        self.add_msg(msg_json, 200)  # 登录状态
+
+    def send_msg(self, data, account):
+        msg_send = {"dst": account, "rsc": self.account, "content": data}
+        msg_json = json.dumps(msg_send)
+        self.add_msg(msg_json, 202)  # 发送状态
 
 
 # GUI类
@@ -101,33 +178,65 @@ class GUI(QWidget):
         self.main_layout = QGridLayout()
         self.main_func()
         self.socket = socket.socket()
-
-    # def initUI(self):
-    #     self.setGeometry(300, 300, 300, 220)
-    #     self.setWindowTitle('Icon')
-    #     self.setWindowIcon(QIcon('web.png'))
-    #     self.show()
-    #
+        self.user_list = {}
+        self.user_send = 0  # 接收消息的用户的账号
 
     def main_func(self):
         print(" ")
         self.login_func()  # 初始进入登录界面
 
-    def check_account(self, account):
+    @staticmethod
+    def check_account(account):
         for s in account:
             if s < '0' or s > '9':
                 return False
         return True
 
+    # 根据对应状态弹出消息提醒盒子
+    @staticmethod
+    def msg_box(state):
+        new_box = QMessageBox()
+        if state == 101:
+            new_box.setWindowTitle("Error")
+            new_box.setText("Input correct account!")
+        elif state == 102:  # 账号错误
+            new_box.setWindowTitle("Error")
+            new_box.setText("Input correct password!")
+        elif state == 103:  # 密码为空
+            new_box.setWindowTitle("error")
+            new_box.setText("Input correct password!")
+        elif state == 403:  # 网络错误
+            new_box.setWindowTitle("Connect Error")
+            new_box.setText("Connect to server failed!")
+        elif state == 401:  # 密码错误
+            new_box.setWindowTitle("Login failed!")
+            new_box.setText("Wrong password!")
+        # elif state ==
+        else:
+            new_box.setWindowTitle("Error")
+            new_box.setText("Unknown Error!")
+        new_box.setStandardButtons(QMessageBox.Ok)
+        new_box.exec()
 
+    # 处理用户登录请求
     def login_handle(self, account, password):
         if account == '':
-            print("eror")
-        elif password == '':
-            print("!")
+            self.msg_box(101)
         elif not self.check_account(account):
-            error_account = QMessageBox.warning(self, "错误", "系统错误")
-            error_account.exec_()
+            self.msg_box(102)
+        elif password == '':
+            self.msg_box(103)
+        else:
+            new_client = ClientThread(account, password, self)  # 创建一个新的客户端线程
+            self.client = new_client
+            new_client.start()
+            login_state = new_client.join()
+            if login_state == 403:
+                self.msg_box(403)
+            elif login_state == 401:
+                self.msg_box(401)
+
+    # 登录功能界面
     def login_func(self):
         self.login_win.setFixedSize(800,400)
         self.login_win.setWindowTitle("Login")
@@ -155,6 +264,7 @@ class GUI(QWidget):
         self.login_win.setLayout(self.login_layout)
         self.login_win.show()
 
+    # 注册功能界面
     def sign_func(self):
         self.sign_win.setFixedSize(800, 400)
         self.sign_win.setWindowTitle("Sign up")
@@ -169,10 +279,18 @@ class GUI(QWidget):
         self.sign_layout.addWidget(e_account, 1, 2)
         self.sign_layout.addWidget(l_pwd, 2, 1)
         self.sign_layout.addWidget(e_pwd, 2, 2)
+        self.sign_layout.addWidget(b_login, 3, 2)
         self.sign_win.setLayout(self.sign_layout)
         self.sign_win.show()
 
-    def chat_ui(self):
+    def change_dst(self, account):
+        self.user_send = account
+
+    def send_handle(self, content_send):
+        self.client.send_thread.send_msg(content_send, self.user_send)  # 调用发送线程接口，加入发送消息队列
+
+    def chat_ui(self, user_list):
+        self.user_list = user_list
         self.main_win.setFixedSize(800, 400)
         self.main_win.setWindowTitle("Sign up")
         chat_browser = QTextBrowser(self)
@@ -185,22 +303,22 @@ class GUI(QWidget):
         write_browser.setFont(QFont('宋体', 8))
         chat_browser.ensureCursorVisible()
 
-        # l_account = QLabel("account")
-        # e_account = QLineEdit()
-        # l_pwd = QLabel("password")
-        # e_pwd = QLineEdit()
+        user_online = QListWidget()  # QComboBox()
+        user_online.resize(200,300)
+        for p in self.user_list:
+            user_online.addItem(f"{user_list[p]}({p})")
+        user_online.clicked.connect(lambda: self.change_dst(user_online.currentItem().text()[-6: -1]))
         b_send = QPushButton("Send")
+        b_send.clicked.connect(lambda: self.send_handle(write_browser.toPlainText()))
         self.main_layout.addWidget(chat_browser, 0, 0)
         self.main_layout.addWidget(write_browser, 1, 0)
         self.main_layout.addWidget(b_send, 2, 1)
 
-        # b_send.clicked.connect(self.login_func)
-        # self.main_layout.addWidget(l_account, 1, 1)
-        # self.main_layout.addWidget(e_account, 1, 2)
-        # self.main_layout.addWidget(l_pwd, 2, 1)
-        # self.main_layout.addWidget(e_pwd, 2, 2)
         self.main_win.setLayout(self.main_layout)
         self.main_win.show()
+
+    def mag_show(self, content, sender):
+        self.main_layout.
 
 
 if __name__ == '__main__':

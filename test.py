@@ -94,3 +94,5 @@ print(test)
 while not recv.msg_empty():
     pp = recv.get_msg()
     print(pp)
+a = lambda x: x + 1
+print(a)
