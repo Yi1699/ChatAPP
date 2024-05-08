@@ -1,4 +1,5 @@
 import json
+import os.path
 import socket
 import threading
 import sys
@@ -8,11 +9,13 @@ from PyQt5.QtWidgets import *
 import struct
 from queue import Queue
 import datetime
+import time
 
 Server_host = '47.109.66.188'
 Server_port = 8000
 Buffer_size = 1024
-
+# sign_state = -1
+# login_state = -1
 
 # 消息类，用于打包和接收消息
 class Massage:
@@ -90,7 +93,8 @@ class Massage:
 # 客户端线程，一个用户建立一个线程
 class ClientThread(threading.Thread, QObject):
     chat_ui_signal = pyqtSignal()   # 聊天主界面信号
-    message_show = pyqtSignal() # 添加新消息信号
+    message_show = pyqtSignal()  # 添加新消息信号
+    box_signal = pyqtSignal()
 
     def __init__(self, state, account, password, win_ui):
         threading.Thread.__init__(self)
@@ -104,10 +108,13 @@ class ClientThread(threading.Thread, QObject):
         self.user_list = {}  # 在线用户列表
         self.msg_data = ""  # 接收的新消息
         self.msg_sender = ""    # 接收的新消息发送方
-        self.chat_ui_signal.connect(lambda: self.win_ui.chat_ui(self.user_list))    # 连接聊天界面
+        self.chat_ui_signal.connect(lambda: self.win_ui.chat_ui(self.user_list, self.account))    # 连接聊天界面
         self.message_show.connect(lambda: self.win_ui.msg_show(self.msg_sender, self.msg_data))     # 连接添加新消息函数
+        self.box_signal.connect(lambda: self.win_ui.msg_box(self.return_state))
         self.send_thread = SendThread(self.sock, self.account)
+        self.send_thread.daemon = True
         self.send_thread.start()
+        # self.chat_ui_signal.emit()
 
     # 用于线程非正常退出时返回状态码
     def join(self, timeout=None):
@@ -116,11 +123,18 @@ class ClientThread(threading.Thread, QObject):
 
     # 线程运行函数重载
     def run(self):
+        # while True:
+        #     time.sleep(1)
+        #     self.new_msg_show("123", "abc")
         try:    # 尝试连接服务器端，并发送登录信息
             self.sock.connect((Server_host, Server_port))
-            self.send_thread.login(self.account, self.password)
+            if self.return_state == 200:
+                self.send_thread.login(self.account, self.password)
+            elif self.return_state == 204:
+                self.send_thread.sign(self.account, self.password)
         except:     # 无法连接则抛出异常 终止线程
             self.return_state = 403
+            self.box_signal.emit()
             # self.chat_ui_signal.emit()
             # self.new_msg_show("123","abc")
             return self.return_state
@@ -134,11 +148,21 @@ class ClientThread(threading.Thread, QObject):
                     self.user_list = json.loads(msg)
                     self.chat_ui_signal.emit()  # 打开聊天界面
                     # return self.return_state
-                elif state == 401:  # 密码错误
-                    return state
                 elif state == 203:  # 接收到服务端消息
                     data = json.loads(msg)
                     self.new_msg_show(data["rsc"], data["content"])     # 聊天框加入新消息
+                elif state == 205:  # 注册成功 退出当前线程 用户需进行登录操作
+                    self.return_state = 205
+                    self.box_signal.emit()
+                    return state
+                elif state == 401:  # 密码错误
+                    self.return_state = state
+                    self.box_signal.emit()
+                    return state
+                elif state == 402:  # 账号已被使用
+                    self.return_state = 402
+                    self.box_signal.emit()
+                    return state
                 else:
                     self.return_state = 2
                     return self.return_state
@@ -166,7 +190,7 @@ class SendThread(threading.Thread):
         # self.sock.connect((Server_host, Server_port))
         while True:
             new_msg = self.wait_send()
-            self.sock.send(new_msg)
+            self.sock.sendall(new_msg)
 
     # 阻塞等待消息队列加入消息 当有新消息则进行处理
     def wait_send(self):
@@ -186,15 +210,85 @@ class SendThread(threading.Thread):
         msg_json = json.dumps(msg_login)
         self.add_msg(msg_json, 200)  # 登录状态
 
+    def sign(self, account, password):
+        msg_sign = {"account": account, "password": password}
+        msg_json = json.dumps(msg_sign)
+        self.add_msg(msg_json, 204)  # 注册状态
+
     # 发送聊天消息
     def send_msg(self, data, account):
         msg_send = {"dst": account, "rsc": self.account, "content": data}
         msg_json = json.dumps(msg_send)
         self.add_msg(msg_json, 202)  # 发送状态
 
+    # def send_file(self, file_path):
+    #     self.send_msg(file_path, "1122")
+
+
+class FileSendThread(threading.Thread, QObject):
+    box_signal = pyqtSignal()
+    bar_signal = pyqtSignal()
+
+    def __init__(self,  src_account, dst_account, file_path, win_ui):
+        threading.Thread.__init__(self)
+        QObject.__init__(self)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.dst_account = dst_account
+        self.src_account = src_account
+        self.file_path = file_path
+        self.send_total = 0  # 已发送的数据长度
+        self.file_size = os.path.getsize(self.file_path)
+        self.win_ui = win_ui
+        self.state = -1
+        self.percent = self.send_total / self.file_size * 100
+        self.box_signal.connect(lambda: self.win_ui.msg_box(self.state))
+        self.bar_signal.connect(lambda: self.win_ui.bar_setval(self.percent))
+        try:
+            self.fp = open(self.file_path, "r")
+        except:
+            self.state = 104
+            self.box_signal.emit()
+
+    def run(self):
+        try:
+            self.sock.connect((Server_host, Server_port))
+            self.send_file_msg()
+            time.sleep(0.001)
+            while self.send_total < self.file_size:
+                buffer = self.fp.read(1000)
+                msg = Massage()
+                msg = msg.pack(buffer, 207)
+                self.sock.sendall(msg)
+                self.send_total += len(buffer)
+                self.percent = self.send_total / self.file_size
+                self.bar_signal.emit()
+        except:
+            self.state = 405
+            self.box_signal.emit()
+            def pbar_change():
+                for i in range(0, 11):
+                    time.sleep(1)
+                    self.percent = i * 10
+                    self.bar_signal.emit()
+            worker = threading.Thread(target=pbar_change)
+            worker.start()
+            return self.state
+
+    def send_file_msg(self):
+        file_msg = {"filename": os.path.split(self.file_path)[1],
+                    "filesize": self.file_size,
+                    "dst": self.dst_account,
+                    "src": self.src_account}
+        file_msg_json = json.dumps(file_msg)
+        msg = Massage()
+        msg = msg.pack(file_msg_json, 206)
+        self.sock.sendall(msg)
+
 
 # GUI类
 class GUI(QWidget):
+    progress_update =pyqtSignal()
+
     def __init__(self):  # 登录窗口，布局，注册窗口，布局，主聊天窗口和布局
         super().__init__()
         self.login_win = QWidget()
@@ -203,16 +297,22 @@ class GUI(QWidget):
         self.sign_layout = QGridLayout()
         self.main_win = QWidget()
         self.main_layout = QGridLayout()
-        self.main_func()
         self.socket = socket.socket()
         self.user_list = {}
         self.user_send = 0  # 接收消息的用户的账号
         self.chat_browser = QTextBrowser(self)
         self.cursot = self.chat_browser.textCursor()
+        self.main_func()
+        self.account = 0
+        self.val = 0
+        self.file_bar = QProgressBar()
+        self.progress_update.connect(lambda: self.bar_setval(self.val))
 
     def main_func(self):
         print(" ")
-        self.login_func()  # 初始进入登录界面
+        self.chat_ui({"12345": "uee"}, "12345")
+        # self.login_func()  # 初始进入登录界面
+        # login_state = new_client.join()
 
     @staticmethod
     def check_account(account):
@@ -237,7 +337,7 @@ class GUI(QWidget):
         elif state == 401:  # 密码错误
             new_box.setWindowTitle("Login Failed!")
             new_box.setText("Wrong password!")
-        elif state == 402:
+        elif state == 402:  # 账号已被使用
             new_box.setWindowTitle("Account Error")
             new_box.setText("Account has been used!")
         elif state == 403:  # 网络错误
@@ -251,6 +351,7 @@ class GUI(QWidget):
 
     # 处理用户登录请求
     def login_handle(self, account, password):
+        # global login_state
         if account == '':
             self.msg_box(101)
         elif not self.check_account(account):
@@ -260,12 +361,13 @@ class GUI(QWidget):
         else:
             new_client = ClientThread(200, account, password, self)  # 创建一个新的客户端线程
             self.client = new_client
+            new_client.daemon = True    # 设置客户端线程为守护线程
             new_client.start()
-            login_state = new_client.join()
-            if login_state == 403:
-                self.msg_box(403)
-            elif login_state == 401:
-                self.msg_box(401)
+            # login_state = new_client.join()
+            # if login_state == 403:
+            #     self.msg_box(403)
+            # elif login_state == 401:
+            #     self.msg_box(401)
 
     def sign_handle(self, account, password):
         if account == '':
@@ -277,24 +379,27 @@ class GUI(QWidget):
         else:
             new_client = ClientThread(204, account, password, self)  # 创建一个新的客户端线程
             self.client = new_client
+            new_client.daemon = True    # 设置客户端线程为守护线程
             new_client.start()
-            sign_state = new_client.join()
-            if sign_state == 403:
-                self.msg_box(403)
-            elif sign_state == 402:
-                self.msg_box(402)
+            # sign_state = new_client.join()
+            # if sign_state == 403:
+            #     self.msg_box(403)
+            # elif sign_state == 402:
+            #     self.msg_box(402)
 
     # 登录功能界面
     def login_func(self):
-        self.login_win.setFixedSize(800,400)
+        self.login_win.setFixedSize(400, 300)
         self.login_win.setWindowTitle("Login")
         l_account = QLabel("account")
+        l_account.setFont(QFont('宋体', 10))
         e_account = QLineEdit()
         l_pwd = QLabel("password")
+        l_pwd.setFont(QFont('宋体', 10))
         e_pwd = QLineEdit()
-        e_account.setFont(QFont('宋体', 8))
+        e_account.setFont(QFont('宋体', 10))
         e_account.setPlaceholderText("请输入你的账号")
-        e_pwd.setFont(QFont('宋体', 8))
+        e_pwd.setFont(QFont('宋体', 10))
         e_pwd.setPlaceholderText("请输入你的密码")
 
         b_sign = QPushButton("sign up")
@@ -313,7 +418,7 @@ class GUI(QWidget):
 
     # 注册功能界面
     def sign_func(self):
-        self.sign_win.setFixedSize(800, 400)
+        self.sign_win.setFixedSize(400, 300)
         self.sign_win.setWindowTitle("Sign up")
         l_account = QLabel("account")
         e_account = QLineEdit()
@@ -333,36 +438,78 @@ class GUI(QWidget):
         self.sign_win.setLayout(self.sign_layout)
         self.sign_win.show()
 
+    # 修改消息接收方账号
     def change_dst(self, account):
         self.user_send = account
+        # print(self.user_send)
 
     def send_handle(self, content_send):
         self.client.send_thread.send_msg(content_send, self.user_send)  # 调用发送线程接口，加入发送消息队列
 
-    def chat_ui(self, user_list):
-        self.user_list = user_list
-        self.main_win.setFixedSize(800, 400)
+    def send_file(self):
+        file_path = QFileDialog.getOpenFileName(self, '选择文件', '')[0]  # 函数返回一个元组 第一个元素为文件绝对路径
+        print(file_path)
+        self.bar_win = QWidget()
+        self.bar_win_layout = QGridLayout()
+        self.file_bar = QProgressBar()
+        self.setWindowTitle('ProgressBar')
+        self.file_bar.setFixedSize(200, 20)
+        self.file_bar.setRange(0, 100)
+        self.file_bar.setValue(10)
+        self.bar_win_layout.addWidget(self.file_bar, 1, 0)
+        # file_thread = FileSendThread(self.account, self.user_send, file_path, self)
+        # file_thread.start()
+        # file_thread.daemon = True
+        self.bar_win.setLayout(self.bar_win_layout)
+        self.bar_win.show()
+
+        def pbar_change():
+            for i in range(11):
+                time.sleep(1)
+                self.val = i * 10
+                self.progress_update.emit()
+
+        worker = threading.Thread(target=pbar_change)
+        worker.daemon = True
+        worker.start()
+
+    def bar_setval(self, val):
+        self.file_bar.setValue(val)
+
+    def chat_ui(self, user_list, login_user):  # 在线用户列表 当前登录的用户账号
+        self.user_list = {"12345": "yee", "10000": "ha"}  # user_list
+        self.main_win.setFixedSize(600, 400)
         self.main_win.setWindowTitle("Sign up")
         self.chat_browser.setFont(QFont('宋体', 10))
         self.chat_browser.setReadOnly(True)
         self.chat_browser.setPlaceholderText('消息展示区域...')
         self.chat_browser.ensureCursorVisible()
-
+        self.account = login_user
         write_browser = QTextEdit(self)
-        write_browser.setFont(QFont('宋体', 8))
+        write_browser.setFont(QFont('宋体', 10))
         self.chat_browser.ensureCursorVisible()
 
-        user_online = QListWidget()  # QComboBox()
-        user_online.resize(200,300)
-        for p in self.user_list:
-            user_online.addItem(f"{user_list[p]}({p})")
-        user_online.clicked.connect(lambda: self.change_dst(user_online.currentItem().text()[-6: -1]))
-        b_send = QPushButton("Send")
-        b_send.clicked.connect(lambda: self.send_handle(write_browser.toPlainText()))
-        self.main_layout.addWidget(self.chat_browser, 0, 0)
-        self.main_layout.addWidget(write_browser, 1, 0)
-        self.main_layout.addWidget(b_send, 2, 1)
+        self.user_online = QListWidget()  # QComboBox()
 
+        for p in self.user_list.keys():
+            self.user_online.addItem(f"{self.user_list[p]}({p})")
+        self.user_online.itemClicked.connect(lambda: self.change_dst(self.user_online.currentItem().text()[-6: -1]))
+        b_send = QPushButton("Send")
+        # b_send.setFixedSize(100,20)
+        b_send.clicked.connect(lambda: self.send_handle(write_browser.toPlainText()))
+        b_send_file = QPushButton("Send File")
+        b_send_file.clicked.connect(lambda: self.send_file())
+        self.main_layout.addWidget(self.chat_browser, 0, 0)
+        self.main_layout.addWidget(write_browser, 1, 0, 3, 1)
+        self.main_layout.addWidget(b_send, 3, 1)
+        self.main_layout.addWidget(self.user_online, 0, 1, 1, 2)
+        self.main_layout.addWidget(b_send_file, 2, 1)
+        self.main_layout.setColumnStretch(0, 2)
+        self.main_layout.setColumnStretch(1, 1)
+        self.main_layout.setRowStretch(0, 4)
+        self.main_layout.setRowStretch(1, 1)
+        self.main_layout.setRowStretch(2, 1)
+        self.main_layout.setRowStretch(3, 1)
         self.main_win.setLayout(self.main_layout)
         self.main_win.show()
 
@@ -377,6 +524,36 @@ class GUI(QWidget):
         # cursor.insertText("\nThis is a new line.")  # 在光标位置插入新文本
         # self.chat_browser.setTextCursor(cursor)  # 设置QTextBrowser的光标
         # self.chat_browser.centerCursor()  # 将光标滚动到视图中
+
+#
+# class ProgressBar(threading.Thread, QObject):
+#     progress_update = pyqtSignal()
+#
+#     def __init__(self):
+#         threading.Thread.__init__(self)
+#         QObject.__init__(self)
+#         self.val = 0
+#         self.file_bar = ProgressBar()
+#         self.file_bar.setWindowTitle('ProgressBar')
+#         self.file_bar.setGeometry(30, 40, 200, 25)
+#         self.file_bar.setRange(0, 100)
+#         self.file_bar.setValue(0)
+#         self.progress_update.connect(lambda: self.setProgress(self.val))
+#
+#     def handleCalc(self):
+#         for i in range(0, 11):
+#             time.sleep(1)
+#             self.setval(10 * i)
+#             self.progress_update.emit()
+#         worker = threading.Thread(target=pbar_change)
+#         worker.start()
+#
+#     # 处理进度的slot函数
+#     def setProgress(self, value):
+#         self.pbar.setValue(value)
+#
+#     def setval(self, val):
+#         self.val = val
 
 
 if __name__ == '__main__':
