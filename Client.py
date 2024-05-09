@@ -17,6 +17,7 @@ Buffer_size = 1024
 # sign_state = -1
 # login_state = -1
 
+
 # 消息类，用于打包和接收消息
 class Massage:
     def __init__(self):
@@ -40,11 +41,35 @@ class Massage:
         self.msg_code += data_code
         return self.msg_code
 
+    # 为要发送的文件数据包进行打包
+    def pack_file(self, data, state):
+        self.add_head(len(data), state)
+        self.msg_code += data
+        return self.msg_code
+
     # 接收消息并放入缓冲区
     def read(self, data_recv):
         self.msg_recv += data_recv
         self.read_head()
         self.change_msg()
+
+    # 接收文件消息并放入缓冲区 文件数据流无需编码解码 直接使用字节流读取并发送
+    def read_file(self, data_recv):
+        self.msg_recv += data_recv
+        self.read_head()
+        if self.curr_len > self.received_len:  # 如果当前消息的长度大于已接收的长度，说明仍未接收完毕
+            # 如果剩余已接收但未处理的消息比剩余未处理的消息短，说明仍有消息未发送完毕，此时将所有消息加入当前处理的消息中
+            if len(self.msg_recv) < self.curr_len - self.received_len:
+                self.msg[self.curr_num] += self.msg_recv
+                self.received_len += len(self.msg_recv)
+                self.msg_recv = b''
+            else:  # 否则未处理的消息部分已经全部被接受，只需截取部分消息加入当前消息中
+                self.msg[self.curr_num] += self.msg_recv[:self.curr_len - self.received_len]
+                self.received_len = 0
+                self.msg_recv = self.msg_recv[self.curr_len - self.received_len:]
+                self.curr_len = 0 if self.msg_len.empty else self.msg_len.get()
+                self.curr_num += 1
+                self.read_head()
 
     # 读取消息头
     def read_head(self):
@@ -57,7 +82,10 @@ class Massage:
             if self.curr_len == 0:
                 self.curr_len = self.msg_len.get()
             self.msg_recv = self.msg_recv[10:]
-            self.msg.append('')
+            if state == 207:
+                self.msg.append(b'')
+            else:
+                self.msg.append('')
 
     # 转换消息格式 将同一个消息的不同包作为同一个消息内容放入消息队列中
     def change_msg(self):
@@ -95,6 +123,7 @@ class ClientThread(threading.Thread, QObject):
     chat_ui_signal = pyqtSignal()   # 聊天主界面信号
     message_show = pyqtSignal()  # 添加新消息信号
     box_signal = pyqtSignal()
+    file_signal = pyqtSignal()
 
     def __init__(self, state, account, password, win_ui):
         threading.Thread.__init__(self)
@@ -108,9 +137,12 @@ class ClientThread(threading.Thread, QObject):
         self.user_list = {}  # 在线用户列表
         self.msg_data = ""  # 接收的新消息
         self.msg_sender = ""    # 接收的新消息发送方
+        self.file_size = 0
+        self.file_name = ""
         self.chat_ui_signal.connect(lambda: self.win_ui.chat_ui(self.user_list, self.account))    # 连接聊天界面
         self.message_show.connect(lambda: self.win_ui.msg_show(self.msg_sender, self.msg_data))     # 连接添加新消息函数
         self.box_signal.connect(lambda: self.win_ui.msg_box(self.return_state))
+        self.file_signal.connect(lambda: self.win_ui.recv_file(self.file_size, self.file_name))
         self.send_thread = SendThread(self.sock, self.account)
         self.send_thread.daemon = True
         self.send_thread.start()
@@ -123,9 +155,6 @@ class ClientThread(threading.Thread, QObject):
 
     # 线程运行函数重载
     def run(self):
-        # while True:
-        #     time.sleep(1)
-        #     self.new_msg_show("123", "abc")
         try:    # 尝试连接服务器端，并发送登录信息
             self.sock.connect((Server_host, Server_port))
             if self.return_state == 200:
@@ -155,6 +184,13 @@ class ClientThread(threading.Thread, QObject):
                     self.return_state = 205
                     self.box_signal.emit()
                     return state
+                elif state == 206:
+                    self.return_state = 206
+                    data = json.loads(msg)
+                    self.new_msg_show(data["rsc"], data["filename"])
+                    self.file_size = data["filesize"]
+                    self.file_name = data["filename"]
+                    self.file_signal.emit()
                 elif state == 401:  # 密码错误
                     self.return_state = state
                     self.box_signal.emit()
@@ -228,6 +264,7 @@ class SendThread(threading.Thread):
 class FileSendThread(threading.Thread, QObject):
     box_signal = pyqtSignal()
     bar_signal = pyqtSignal()
+    bar_close_signal = pyqtSignal()
 
     def __init__(self,  src_account, dst_account, file_path, win_ui):
         threading.Thread.__init__(self)
@@ -236,6 +273,7 @@ class FileSendThread(threading.Thread, QObject):
         self.dst_account = dst_account
         self.src_account = src_account
         self.file_path = file_path
+        self.file_name = os.path.split(self.file_path)[1]
         self.send_total = 0  # 已发送的数据长度
         self.file_size = os.path.getsize(self.file_path)
         self.win_ui = win_ui
@@ -243,8 +281,9 @@ class FileSendThread(threading.Thread, QObject):
         self.percent = self.send_total / self.file_size * 100
         self.box_signal.connect(lambda: self.win_ui.msg_box(self.state))
         self.bar_signal.connect(lambda: self.win_ui.bar_setval(self.percent))
+        self.bar_close_signal.connect(self.win_ui.bar_win.close)
         try:
-            self.fp = open(self.file_path, "r")
+            self.fp = open(self.file_path, "rb")
         except:
             self.state = 104
             self.box_signal.emit()
@@ -253,30 +292,38 @@ class FileSendThread(threading.Thread, QObject):
         try:
             self.sock.connect((Server_host, Server_port))
             self.send_file_msg()
+            # fo = open(f"C:\\Users\\ChenJiayi\\Desktop\\AnyFiles\\{self.file_name}", "wb+")
             time.sleep(0.001)
             while self.send_total < self.file_size:
                 buffer = self.fp.read(1000)
                 msg = Massage()
-                msg = msg.pack(buffer, 207)
+                msg = msg.pack_file(buffer, 207)
                 self.sock.sendall(msg)
+                # fo.write(msg)
                 self.send_total += len(buffer)
-                self.percent = self.send_total / self.file_size
+                self.percent = int(self.send_total / self.file_size * 100)
                 self.bar_signal.emit()
+                time.sleep(0.001)
+            self.fp.close()
         except:
             self.state = 405
             self.box_signal.emit()
+            self.fp.close()
             def pbar_change():
-                for i in range(0, 11):
+                for i in range(11):
                     time.sleep(1)
                     self.percent = i * 10
                     self.bar_signal.emit()
+                time.sleep(1)
+                self.bar_close_signal.emit()
             worker = threading.Thread(target=pbar_change)
+            worker.daemon = True
             worker.start()
             return self.state
 
     def send_file_msg(self):
-        file_msg = {"filename": os.path.split(self.file_path)[1],
-                    "filesize": self.file_size,
+        file_msg = {"filename": self.file_name,
+                    "size": self.file_size,
                     "dst": self.dst_account,
                     "src": self.src_account}
         file_msg_json = json.dumps(file_msg)
@@ -285,9 +332,71 @@ class FileSendThread(threading.Thread, QObject):
         self.sock.sendall(msg)
 
 
+class FileReceiveThread(threading.Thread, QObject):
+    box_signal = pyqtSignal()
+    bar_signal = pyqtSignal()
+    bar_close_signal = pyqtSignal()
+
+    def __init__(self, account, file_path, file_size, win_ui):
+        threading.Thread.__init__(self)
+        QObject.__init__(self)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.account = account  # 接收文件的账号信息
+        self.file_path = file_path  # 保存文件路径
+        # self.file_name = os.path.split(self.file_path)[1]
+        self.rcv_total = 0  # 已接收的数据长度
+        self.file_size = file_size  # 文件大小
+        self.file_recv = Massage()  # 接收文件用的消息类
+        self.win_ui = win_ui
+        self.state = -1
+        self.percent = self.rcv_total / self.file_size * 100
+        self.box_signal.connect(lambda: self.win_ui.msg_box(self.state))
+        self.bar_signal.connect(lambda: self.win_ui.bar_setval(self.percent))
+        self.bar_close_signal.connect(self.win_ui.bar_win.close)
+        try:
+            self.fp = open(self.file_path, "wb+")
+        except:
+            self.state = 106
+            self.box_signal.emit()
+
+    def run(self):
+        try:
+            self.sock.connect((Server_host, Server_port))
+            self.send_file_state()  # 告诉服务器准备接收文件
+            while True:  # 循环接收文件 直到发送完毕
+                self.file_recv.read_file(self.sock.recv(Buffer_size))
+                while not self.msg_recv.msg_empty():
+                    msg, state = self.file_rcv.get_msg()
+                    # 每次读取一条消息
+                    if state == 207:  # 文件传输中
+                        self.rcv_total += len(msg)
+                        self.fp.write(msg)
+                        self.bar_signal.emit()  # 更新进度条
+                    elif state == 209 or self.file_size == self.rcv_total:
+                        self.state = 209
+                        self.box_signal.emit()
+                        self.bar_close_signal.emit()  # 关闭进度条以及弹窗提示已完成
+                        return
+        except:
+            self.state = 405
+            self.box_signal.emit()
+            self.fp.close()
+            return self.state
+
+    # 告诉服务器准备接收文件
+    def send_file_state(self):
+        file_msg = {"filename": self.file_name,
+                    "size": self.file_size,
+                    "account": self.account}
+        file_msg_json = json.dumps(file_msg)
+        msg = Massage()
+        msg = msg.pack(file_msg_json, 208)
+        self.sock.sendall(msg)
+
+
 # GUI类
 class GUI(QWidget):
-    progress_update =pyqtSignal()
+    progress_update = pyqtSignal()
 
     def __init__(self):  # 登录窗口，布局，注册窗口，布局，主聊天窗口和布局
         super().__init__()
@@ -297,6 +406,10 @@ class GUI(QWidget):
         self.sign_layout = QGridLayout()
         self.main_win = QWidget()
         self.main_layout = QGridLayout()
+        self.bar_win = QWidget()
+        self.bar_win_layout = QGridLayout()  # 进度条部件窗口 用于文件传输
+        self.file_bar = QProgressBar()
+        self.user_online = QListWidget()  # QComboBox()
         self.socket = socket.socket()
         self.user_list = {}
         self.user_send = 0  # 接收消息的用户的账号
@@ -305,8 +418,7 @@ class GUI(QWidget):
         self.main_func()
         self.account = 0
         self.val = 0
-        self.file_bar = QProgressBar()
-        self.progress_update.connect(lambda: self.bar_setval(self.val))
+        # self.progress_update.connect(lambda: self.bar_setval(self.val))
 
     def main_func(self):
         print(" ")
@@ -334,6 +446,15 @@ class GUI(QWidget):
         elif state == 103:  # 密码为空
             new_box.setWindowTitle("Empty Password")
             new_box.setText("Input correct password!")
+        elif state == 104:
+            new_box.setWindowTitle("Unknown file")
+            new_box.setText("Choose correct file!")
+        elif state == 105:
+            new_box.setWindowTitle("Success!")
+            new_box.setText("File sent successfully!")
+        elif state == 106:
+            new_box.setWindowTitle("Error")
+            new_box.setText("No enough right to save here!")
         elif state == 401:  # 密码错误
             new_box.setWindowTitle("Login Failed!")
             new_box.setText("Wrong password!")
@@ -446,38 +567,48 @@ class GUI(QWidget):
     def send_handle(self, content_send):
         self.client.send_thread.send_msg(content_send, self.user_send)  # 调用发送线程接口，加入发送消息队列
 
+    # 发送文件UI 显示进度条
     def send_file(self):
         file_path = QFileDialog.getOpenFileName(self, '选择文件', '')[0]  # 函数返回一个元组 第一个元素为文件绝对路径
-        print(file_path)
-        self.bar_win = QWidget()
-        self.bar_win_layout = QGridLayout()
-        self.file_bar = QProgressBar()
-        self.setWindowTitle('ProgressBar')
+        # print(file_path)
+        self.bar_win.setWindowTitle('Send Progress')
         self.file_bar.setFixedSize(200, 20)
         self.file_bar.setRange(0, 100)
-        self.file_bar.setValue(10)
+        self.file_bar.setValue(0)
         self.bar_win_layout.addWidget(self.file_bar, 1, 0)
-        # file_thread = FileSendThread(self.account, self.user_send, file_path, self)
-        # file_thread.start()
-        # file_thread.daemon = True
+        file_thread = FileSendThread(self.account, self.user_send, file_path, self)
+        file_thread.daemon = True
+        file_thread.start()
         self.bar_win.setLayout(self.bar_win_layout)
         self.bar_win.show()
 
-        def pbar_change():
-            for i in range(11):
-                time.sleep(1)
-                self.val = i * 10
-                self.progress_update.emit()
+    # 接收文件UI 显示接收进度条与文件保存路径按钮
+    def recv_file(self, filesize, filename):
+        self.bar_win.setWindowTitle('New File to Receive')
+        self.file_bar.setFixedSize(200, 20)
+        self.file_bar.setRange(0, 100)
+        self.file_bar.setValue(0)
 
-        worker = threading.Thread(target=pbar_change)
-        worker.daemon = True
-        worker.start()
+        # 文件开始传输 新建一个接收进程用于接收文件
+        def start_trans():
+            file_path = QFileDialog.getSaveFileName(self, '选择文件夹', filename, '')[0]  # 函数返回一个元组 第一个元素为文件绝对路径
+            file_thread = FileReceiveThread(self.account, file_path, filesize, self)
+            file_thread.daemon = True
+            file_thread.start()
+
+        start_button = QPushButton()
+        start_button.setText("Start")
+        start_button.clicked.connect(lambda: start_trans())
+        self.bar_win_layout.addWidget(self.file_bar, 0, 0, 1, 2)
+        self.bar_win_layout.addWidget(start_button, 1, 0)
+        self.bar_win.setLayout(self.bar_win_layout)
+        self.bar_win.show()
 
     def bar_setval(self, val):
         self.file_bar.setValue(val)
 
     def chat_ui(self, user_list, login_user):  # 在线用户列表 当前登录的用户账号
-        self.user_list = {"12345": "yee", "10000": "ha"}  # user_list
+        self.user_list = {"12345": "yee", "10000": "ha"}  # 测试用; 实际为user_list
         self.main_win.setFixedSize(600, 400)
         self.main_win.setWindowTitle("Sign up")
         self.chat_browser.setFont(QFont('宋体', 10))
@@ -488,8 +619,6 @@ class GUI(QWidget):
         write_browser = QTextEdit(self)
         write_browser.setFont(QFont('宋体', 10))
         self.chat_browser.ensureCursorVisible()
-
-        self.user_online = QListWidget()  # QComboBox()
 
         for p in self.user_list.keys():
             self.user_online.addItem(f"{self.user_list[p]}({p})")
@@ -518,42 +647,6 @@ class GUI(QWidget):
         self.chat_browser.append(sender)  # 在指定的区域显示提示信息
         self.chat_browser.append(msg_data)
         self.chat_browser.moveCursor(self.cursot.End)
-        # a = data
-        # cursor = self.chat_browser.textCursor()
-        # cursor.movePosition(QTextCursor.End)  # 将光标移动到文本末尾
-        # cursor.insertText("\nThis is a new line.")  # 在光标位置插入新文本
-        # self.chat_browser.setTextCursor(cursor)  # 设置QTextBrowser的光标
-        # self.chat_browser.centerCursor()  # 将光标滚动到视图中
-
-#
-# class ProgressBar(threading.Thread, QObject):
-#     progress_update = pyqtSignal()
-#
-#     def __init__(self):
-#         threading.Thread.__init__(self)
-#         QObject.__init__(self)
-#         self.val = 0
-#         self.file_bar = ProgressBar()
-#         self.file_bar.setWindowTitle('ProgressBar')
-#         self.file_bar.setGeometry(30, 40, 200, 25)
-#         self.file_bar.setRange(0, 100)
-#         self.file_bar.setValue(0)
-#         self.progress_update.connect(lambda: self.setProgress(self.val))
-#
-#     def handleCalc(self):
-#         for i in range(0, 11):
-#             time.sleep(1)
-#             self.setval(10 * i)
-#             self.progress_update.emit()
-#         worker = threading.Thread(target=pbar_change)
-#         worker.start()
-#
-#     # 处理进度的slot函数
-#     def setProgress(self, value):
-#         self.pbar.setValue(value)
-#
-#     def setval(self, val):
-#         self.val = val
 
 
 if __name__ == '__main__':
