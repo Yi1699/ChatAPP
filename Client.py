@@ -11,7 +11,7 @@ from queue import Queue
 import datetime
 import time
 
-Server_host = '47.109.66.188'
+Server_host = socket.gethostname()# '47.109.66.188'
 Server_port = 8000
 Buffer_size = 1024
 # sign_state = -1
@@ -237,7 +237,7 @@ class SendThread(threading.Thread):
     # 外部调用接口，封装数据包加入消息队列
     def add_msg(self, data, state):
         data_send = Massage()
-        data_send.pack(data, state)
+        data_send = data_send.pack(data, state)
         self.msg_list.put(data_send)
 
     # 发送登录信息
@@ -422,8 +422,8 @@ class GUI(QWidget):
 
     def main_func(self):
         print(" ")
-        self.chat_ui({"12345": "uee"}, "12345")
-        # self.login_func()  # 初始进入登录界面
+        # self.chat_ui({"12345": "uee"}, "12345")
+        self.login_func()  # 初始进入登录界面
         # login_state = new_client.join()
 
     @staticmethod
